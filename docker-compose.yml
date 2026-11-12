@@ -1,0 +1,25 @@
+services:
+  node0:
+    build: .
+    command: ["-id=0", "-listen=0.0.0.0:9000", "-total=5", "-data=/data/node0", "-peers=node1:9001,node2:9002,node3:9003,node4:9004"]
+    ports: ["9000:9000"]
+
+  node1:
+    build: .
+    command: ["-id=1", "-listen=0.0.0.0:9001", "-total=5", "-data=/data/node1", "-peers=node0:9000,node2:9002,node3:9003,node4:9004"]
+    ports: ["9001:9001"]
+
+  node2:
+    build: .
+    command: ["-id=2", "-listen=0.0.0.0:9002", "-total=5", "-data=/data/node2", "-peers=node0:9000,node1:9001,node3:9003,node4:9004"]
+    ports: ["9002:9002"]
+
+  node3:
+    build: .
+    command: ["-id=3", "-listen=0.0.0.0:9003", "-total=5", "-data=/data/node3", "-peers=node0:9000,node1:9001,node2:9002,node4:9004"]
+    ports: ["9003:9003"]
+
+  node4:
+    build: .
+    command: ["-id=4", "-listen=0.0.0.0:9004", "-total=5", "-data=/data/node4", "-peers=node0:9000,node1:9001,node2:9002,node3:9003"]
+    ports: ["9004:9004"]
