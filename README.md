@@ -1,74 +1,41 @@
-# Deterministic Institutional Settlement & Clearing Engine (`BFT` / `DvP`)
+# Deterministic Institutional Settlement & Clearing Engine
 
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
-[![Consensus](https://img.shields.io/badge/Consensus-Leader--Based_BFT_(2f%2B1)-blueviolet?style=flat-square)]()
-[![Cryptography](https://img.shields.io/badge/Crypto-Ed25519_%7C_SHA--256_Merkle-success?style=flat-square)]()
-[![Persistence](https://img.shields.io/badge/Storage-Binary_WAL_(fsync)-orange?style=flat-square)]()
-[![Deployment](https://img.shields.io/badge/Container-Docker_Compose_(5_Nodes)-2496ED?style=flat-square&logo=docker)]()
-
-A zero-dependency, distributed financial clearinghouse and deterministic settlement engine written in **Go**. Engineered to eliminate counterparty settlement risk (*Herstatt Risk*) via **Atomic Delivery-versus-Payment (DvP)** transactions, **Byzantine Fault Tolerant (BFT)** quorum consensus, **fixed-point deterministic state machines**, and **$O(\log N)$ cryptographic Merkle audit proofs**.
+A zero-dependency, distributed financial clearinghouse and deterministic settlement engine written in Go (`1.23+`). Built to eliminate principal settlement risk (*Herstatt Risk*) through **Atomic Delivery-versus-Payment (DvP)** transactions, **Leader-Based Byzantine Fault Tolerant (BFT)** consensus, **64-bit fixed-point deterministic state transitions**, and **$O(\log N)$ cryptographic Merkle audit proofs**.
 
 ---
 
-## 1. Executive Summary & Institutional Motivation
+## 1. Overview & Motivation
 
-In traditional capital markets, post-trade clearing and settlement often suffer from multi-day finality windows ($T+1$ / $T+2$) and principal risk—where one counterparty delivers an asset while the other defaults before payment clears. Conversely, public Layer-1 blockchains introduce probabilistic finality, non-deterministic gas auctions, and front-running vulnerability (MEV).
+In institutional capital markets, post-trade clearing and settlement frequently rely on delayed batch cycles ($T+1$ / $T+2$) that expose counterparties to principal risk—where one party delivers an asset before the other settles payment. Conversely, public Layer-1 networks introduce probabilistic finality, non-deterministic execution ordering, and front-running exposure (MEV).
 
-This engine implements a **permissioned institutional settlement core** combining the deterministic guarantees of cryptographic state machines with the sub-100ms finality of high-frequency financial infrastructure:
+This project implements a permissioned institutional settlement core combining deterministic state replication with sub-100ms finality:
 
-* **Zero Principal Risk (Atomic DvP):** Multi-asset trades (`AssetIn` $\leftrightarrow$ `AssetOut`) require dual cryptographic authorization (`Ed25519` signatures from both Buyer and Seller) and execute as a single indivisible state transition.
-* **Instant & Irreversible Finality:** Blocks are committed only when signed by a supermajority BFT quorum ($\lfloor \frac{2N}{3} \rfloor + 1$), guaranteeing zero chain reorganizations or rollbacks.
-* **Bit-for-Bit Determinism:** Eliminates IEEE-754 floating-point drift across heterogeneous CPU architectures by enforcing 64-bit fixed-point arithmetic (`int64` scaled by $10^8$).
-* **MEV & Replay Immunity:** Enforces strict per-account sequential `Nonce` tracking and canonical transaction ordering (`Nonce ASC`, `TxHash ASC`) prior to block execution.
-* **Crash-Safe Durability & Autonomous Catch-Up:** Persists committed blocks to a length-prefixed binary Write-Ahead Log (`ledger.wal`) with hardware `fsync` before acknowledgement, paired with an autonomous peer-to-peer synchronization loop for lagging or restarted nodes.
+* **Atomic Delivery-versus-Payment (DvP):** Multi-asset swaps (`AssetIn` $\leftrightarrow$ `AssetOut`) require dual `Ed25519` cryptographic signatures from both counterparties and execute as an indivisible state transition.
+* **Deterministic Finality:** Blocks are committed strictly upon collecting a supermajority BFT quorum ($\lfloor \frac{2N}{3} \rfloor + 1$), preventing chain reorganizations or post-trade rollbacks.
+* **Bit-for-Bit State Determinism:** Eliminates IEEE-754 floating-point divergence across architectures by representing all balances as signed 64-bit integers (`int64`) scaled by $10^8$.
+* **Replay & Ordering Protection:** Enforces strict per-account sequential `Nonce` validation and canonical transaction sorting (`Nonce ASC`, `TxHash ASC`) prior to block execution.
+* **Crash-Safe Persistence & Autonomous Catch-Up:** Commits blocks to a length-prefixed binary Write-Ahead Log (`ledger.wal`) with explicit OS kernel flushes (`fsync`), paired with an autonomous peer-to-peer synchronization loop to recover restarted or lagging validators.
 
 ---
 
-## 2. System Architecture & End-to-End Settlement Pipeline
+## 2. System Architecture
 
-The system is structured into four strictly decoupled layers (`core`, `storage`, `consensus`, `network`) with **zero external third-party libraries**, relying exclusively on the Go standard library (`crypto/ed25519`, `crypto/sha256`, `net/rpc`, `sync/atomic`).
+The codebase is organized into four decoupled layers (`core`, `storage`, `consensus`, `network`) using exclusively the Go standard library (`crypto/ed25519`, `crypto/sha256`, `net/rpc`, `sync/atomic`).
 
-```text
-+-----------------------------------------------------------------------------------+
-|                        INSTITUTIONAL TRADING PARTICIPANTS                         |
-|         Citadel-Desk-A (Buyer)                     JaneStreet-MM-B (Seller)       |
-|      Signs Leg 1 (Ed25519 SenderSig)            Signs Leg 2 (Ed25519 CounterSig)  |
-+-----------------------------------------+-----------------------------------------+
-                                          |
-                          Submit Atomic DvP Swap (TCP RPC)
-                                          v
-+-----------------------------------------------------------------------------------+
-|                         5-NODE BFT VALIDATOR CLUSTER                              |
-|                                                                                   |
-|   +-------------------+      Gossip Tx       +-------------------------------+    |
-|   |   Node 0 (Leader) | -------------------> | Nodes 1, 2, 3, 4 (Validators) |    |
-|   +---------+---------+                      +---------------+---------------+    |
-|             |                                                |                    |
-|             | 1. Canonical Sort (Nonce, TxHash)              |                    |
-|             | 2. PreviewBlock() on Cloned State              | 3. Verify Sigs     |
-|             | 3. Compute Provisional StateRoot               | 4. Re-compute Root |
-|             |                                                | 5. Sign BFT Vote   |
-|             |<--------- Collect >= 4/5 Signed Votes ---------+                    |
-|             |                                                                     |
-|             +---------> Broadcast CommitBlock (Quorum Verified)                   |
-+-----------------------------------------+-----------------------------------------+
-                                          |
-              +---------------------------+---------------------------+
-              v                                                       v
-+-----------------------------------+           +-----------------------------------+
-|   DETERMINISTIC STATE MACHINE     |           |     BINARY WRITE-AHEAD LOG        |
-|  - Atomic Balance Mutation        |           |  - Length-Prefixed Gob Encoding   |
-|  - Nonce Increment                |           |  - OS Kernel Flush (file.Sync)    |
-|  - O(log N) Merkle Tree Rebuild   |           |  - Catch-Up Sync Serving          |
-+-----------------------------------+           +-----------------------------------+
-```
+### Settlement Lifecycle
 
-### Package Structure
+1. **Dual-Signed Order Submission:** Counterparties sign their respective legs of an `AtomicSwap` transaction (`SenderSig` and `CounterpartySig`) and submit the payload to any validator node via TCP RPC.
+2. **Gossip & Validation:** The receiving validator validates cryptographic signatures and sequential `Nonce` constraints, inserts the transaction into its concurrent `Mempool`, and gossips it to all peer nodes.
+3. **Canonical Batch Proposal:** Every `50ms`, the deterministic round leader (`(Height + View) mod N`) extracts pending transactions, sorts them canonically (`Nonce`, `TxHash`), simulates execution on a cloned state (`PreviewBlock`), and broadcasts a signed `BlockProposal` containing the provisional `StateRoot`.
+4. **BFT Quorum Voting:** Each validator independently executes the proposed transactions against its local state. If its computed `StateRoot` matches the proposal, it returns an `Ed25519`-signed approval vote.
+5. **Commit & Persistence:** Once at least 4 of 5 validators approve the exact `StateRoot`, the leader broadcasts `CommitBlock`. Each node mutates its live state, appends the block to `ledger.wal` with `file.Sync()`, and updates its binary Merkle Tree.
+
+### Repository Structure
 
 ```text
 deterministic-settlement-ledger/
 ├── core/
-│   ├── types.go                     # Fixed-point scale (10^8), Ed25519 dual-signed Tx & Block structs
+│   ├── types.go                     # Fixed-point scale (10^8), Ed25519 dual-signed Tx & Block definitions
 │   ├── merkle.go                    # Binary SHA-256 Merkle Tree & O(log N) inclusion proof verifier
 │   ├── state.go                     # Thread-safe StateMachine, canonical sorting, Preview/Apply logic
 │   └── state_test.go                # Unit tests for determinism, anti-replay, and atomic rollback
@@ -76,8 +43,8 @@ deterministic-settlement-ledger/
 │   ├── mempool.go                   # Concurrent-safe pending transaction buffer & deduplication
 │   └── bft.go                       # Leader rotation, proposal signing, and 2f+1 quorum verification
 ├── storage/
-│   ├── store.go                     # Length-prefixed binary WAL with hardware fsync & state recovery
-│   └── recovery_byzantine_test.go   # Crash recovery & Byzantine malicious state-root rejection tests
+│   ├── store.go                     # Length-prefixed binary WAL with fsync & crash state recovery
+│   └── recovery_byzantine_test.go   # WAL recovery & Byzantine state-root rejection unit tests
 ├── network/
 │   ├── rpc.go                       # TCP RPC transport, 50ms consensus loop, gossip & Catch-Up Sync
 │   └── http.go                      # JSON Observability API (/status, /accounts, /account) & Prometheus
@@ -86,7 +53,7 @@ deterministic-settlement-ledger/
 ├── cmd/
 │   ├── node/main.go                 # Production validator daemon with graceful signal handling
 │   └── cli/main.go                  # Interactive DvP trade simulator ('demo' & continuous 'trade' modes)
-├── Dockerfile                       # Multi-stage Alpine build (<15MB static binary image)
+├── Dockerfile                       # Multi-stage Alpine build for static node/CLI binaries
 └── docker-compose.yml               # 5-validator isolated bridge network topology
 ```
 
@@ -95,43 +62,41 @@ deterministic-settlement-ledger/
 ## 3. Core Engineering & Mathematical Guarantees
 
 ### 3.1 Fixed-Point Arithmetic (`int64` Scaling)
-Standard IEEE-754 floating-point types (`float64`) cannot represent base-10 fractions (e.g., `0.1 + 0.2 != 0.3`) accurately in binary, causing state root divergence across nodes. All asset quantities are stored as signed 64-bit integers scaled by $\text{ScaleFactor} = 10^8$:
+Standard IEEE-754 floating-point types (`float64`) cannot represent base-10 fractions accurately in binary, risking state root divergence across nodes. All asset quantities are stored as signed 64-bit integers scaled by $\text{ScaleFactor} = 10^8$:
 
 $$\text{Amount}_{\text{internal}} = \text{Amount}_{\text{human}} \times 10^8$$
 
-For example, $120,000.00\text{ USD}$ is processed as `12000000000000` and $2.00000000\text{ BTC}$ as `200000000`.
+For example, $120,000.00\text{ USD}$ is stored as `12000000000000` and $2.00000000\text{ BTC}$ as `200000000`.
 
-### 3.2 Atomic Delivery-versus-Payment (DvP) & Rollback Safety
-During block proposal and validation (`PreviewBlock`), the state machine clones the in-memory account map and validates every transaction in canonical order:
-1. **Cryptographic Integrity:** Verifies `ed25519.Verify(Sender, SigningPayload, SenderSig)` and, for `TxAtomicSwap`, `ed25519.Verify(Counterparty, SigningPayload, CounterpartySig)`.
-2. **Strict Nonce Sequencing:** Enforces $\text{Tx.Nonce} == \text{Account.Nonce} + 1$. Duplicate or out-of-order transactions are rejected before mutating state.
-3. **All-or-Nothing Balance Check:** Both legs of the swap must hold sufficient funds simultaneously:
+### 3.2 Atomic DvP & Rollback Safety
+During block proposal and verification (`PreviewBlock`), the state machine operates on an isolated clone of the account map and enforces three invariants per transaction:
+1. **Dual-Signature Verification:** Confirms `ed25519.Verify(Sender, SigningPayload, SenderSig)` and `ed25519.Verify(Counterparty, SigningPayload, CounterpartySig)`.
+2. **Sequential Nonce Enforcement:** Requires $\text{Tx.Nonce} == \text{Account.Nonce} + 1$, preventing replay attacks and out-of-order execution.
+3. **Simultaneous Solvency Check:** Both legs of the swap must hold sufficient balance at execution time:
 
 $$\text{Balance}_{\text{Sender}}[\text{AssetIn}] \ge \text{AmountIn} \quad \land \quad \text{Balance}_{\text{Counterparty}}[\text{AssetOut}] \ge \text{AmountOut}$$
 
-If any single transaction in a block fails validation, the entire provisional state is discarded without side effects.
+If any transaction in a proposed batch fails validation, the provisional state is discarded without mutating live balances.
 
-### 3.3 Byzantine Fault Tolerant (BFT) Consensus ($N = 3f + 1$)
-With $N = 5$ validators, the cluster tolerates up to $f = 1$ arbitrary (crash or malicious Byzantine) node failure while preserving safety and liveness. The required quorum size is:
+### 3.3 Byzantine Fault Tolerant Consensus ($N = 3f + 1$)
+With $N = 5$ validators, the cluster tolerates up to $f = 1$ arbitrary (crash or malicious Byzantine) node failure while maintaining safety and liveness. The required quorum threshold is:
 
 $$Q = \left\lfloor \frac{2N}{3} \right\rfloor + 1 = \left\lfloor \frac{10}{3} \right\rfloor + 1 = 4 \text{ validators}$$
 
-* **Deterministic Leader Rotation:** For block height $H$ and view $V$, the designated proposer is $\text{Leader} = (H + V) \bmod N$.
-* **StateRoot Agreement:** Validators do not merely vote on block hashes; each validator independently executes the block's transactions and signs the resulting 32-byte `StateRoot`. If a compromised node votes for a falsified state root, `VerifyQuorum` rejects the vote.
+Validators sign the resulting 32-byte `StateRoot` rather than only the block header; votes endorsing a mismatched state root are rejected by `VerifyQuorum`.
 
 ### 3.4 Deterministic Merkle State Root & $O(\log N)$ Audit Proofs
-After every block commit, the state machine sorts all account public keys lexicographically, hashes each account (`Address || Nonce || Sorted(Asset:Balance)`), and constructs a balanced binary **SHA-256 Merkle Tree**.
-* External auditors can query `GET /account?address=<pubkey>` to retrieve an inclusion proof consisting of $\lceil \log_2(N) \rceil$ sibling hashes, verifying mathematically that an account balance is included in the cluster's consensus `StateRoot` without downloading the full ledger.
+Following every block commit, account public keys are sorted lexicographically, serialized (`Address || Nonce || Sorted(Asset:Balance)`), and hashed into a balanced binary **SHA-256 Merkle Tree**. External auditors can query `GET /account?address=<pubkey>` to obtain an inclusion branch of $\lceil \log_2(N) \rceil$ sibling hashes and verify account solvency against the consensus `StateRoot` without downloading the full ledger.
 
 ### 3.5 Binary Write-Ahead Log (`WAL`) & Autonomous Catch-Up Sync
-* **Disk Persistence:** Every committed block is serialized via `encoding/gob` with a 4-byte Big-Endian length prefix (`[uint32 length][payload]`) into `ledger.wal` followed by an explicit OS kernel flush (`file.Sync()`).
-* **Catch-Up State Sync:** A background `syncLoop` runs every `150ms` on each validator, querying peer heights via `GetStatus` and fetching missing historical blocks via `GetBlocksFrom` to seamlessly heal network partitions or node restarts.
+* **Disk Durability:** Committed blocks are encoded via `encoding/gob` with a 4-byte Big-Endian length prefix (`[uint32 length][payload]`) into `ledger.wal` followed by `file.Sync()`.
+* **Catch-Up Synchronization:** A background `syncLoop` polls peer heights every `150ms` via `GetStatus` and pulls missing blocks via `GetBlocksFrom` to automatically heal node restarts or transient network partitions.
 
 ---
 
-## 4. Empirical Benchmarks & Chaos Engineering Results
+## 4. Benchmarks & Chaos Engineering Verification
 
-The test suite (`benchmarks/benchmark_test.go`) spins up a live 5-node cluster over local TCP sockets, funds **100 institutional accounts**, **kills Node 4 mid-flight** to simulate a sudden server outage, executes **500 concurrent Atomic DvP swaps**, and restarts Node 4 to verify autonomous Catch-Up Synchronization.
+The benchmark suite (`benchmarks/benchmark_test.go`) deploys a 5-node cluster over local TCP sockets, funds **100 institutional accounts**, **terminates Node 4 mid-execution** to simulate a validator outage, processes **500 concurrent Atomic DvP swaps**, and restarts Node 4 to verify autonomous Catch-Up Synchronization.
 
 ```text
 === QUANT SETTLEMENT BENCHMARK & RECOVERY RESULTS (5/5 Synced BFT Nodes) ===
@@ -151,11 +116,11 @@ Final Consensus Merkle StateRoot: 922470a6e127dab5dee759453dbb4cbfac80a106a40c58
 | **Median Finality (`p50`)** | **57.5 ms** | Single-round TCP RPC quorum voting + in-memory state preview |
 | **Tail Finality (`p99`)** | **95.5 ms** | Hardware `fsync` WAL flush + Ed25519 dual-signature verification |
 | **Fault Tolerance** | **1 Node Down ($4/5$ Active)** | Zero dropped transactions during simulated validator crash |
-| **Merkle Audit Proof Size** | **7 Hashes ($224\text{ bytes}$)** | $\lceil \log_2(100\text{ accounts}) \rceil = 7$ tree levels |
+| **Merkle Proof Size** | **7 Hashes ($224\text{ bytes}$)** | $\lceil \log_2(100\text{ accounts}) \rceil = 7$ tree levels |
 
 ---
 
-## 5. Quick Start & Operational Guide
+## 5. Quick Start & Usage
 
 ### 5.1 Run Automated Unit, Byzantine & Chaos Benchmark Tests
 Requires Go `1.23+`:
@@ -164,14 +129,14 @@ Requires Go `1.23+`:
 go test -v ./...
 ```
 
-### 5.2 Launch the 5-Node Distributed Cluster via Docker Compose
-Build the multi-stage Alpine images and start all 5 isolated validator containers (`node0` through `node4`):
+### 5.2 Start the 5-Node Cluster via Docker Compose
+Build the multi-stage Alpine images and launch all 5 validator containers (`node0` through `node4`):
 
 ```bash
 docker compose up --build
 ```
 
-| Validator Node | Internal / Host TCP RPC Port | Host HTTP & Prometheus API |
+| Validator Node | TCP RPC Endpoint | HTTP & Prometheus Endpoint |
 | :--- | :--- | :--- |
 | **`node0`** | `127.0.0.1:9000` | `http://localhost:8080` |
 | **`node1`** | `127.0.0.1:9001` | `http://localhost:8081` |
@@ -180,23 +145,21 @@ docker compose up --build
 | **`node4`** | `127.0.0.1:9004` | `http://localhost:8084` |
 
 ### 5.3 Execute Institutional DvP Settlements via CLI
-Open a second terminal while the Docker cluster is running:
+In a second terminal while the cluster is running:
 
 1. **Initialize participant accounts (`1,000,000 USD` & `50 BTC`) and execute an initial Atomic DvP Swap (`1 BTC` $\leftrightarrow$ `60,000 USD`):**
    ```bash
    go run ./cmd/cli -mode=demo
    ```
 
-2. **Stream a burst of 10 consecutive Atomic DvP Swaps (`0.2 BTC` $\leftrightarrow$ `10,000 USD` each) with automatic `Nonce` discovery:**
+2. **Execute a stream of 10 consecutive Atomic DvP Swaps (`0.2 BTC` $\leftrightarrow$ `10,000 USD` each) with automatic `Nonce` resolution:**
    ```bash
    go run ./cmd/cli -mode=trade -n=10
    ```
 
-### 5.4 Real-Time Observability, Merkle Auditing & Prometheus Metrics
+### 5.4 Observability, Merkle Auditing & Prometheus Endpoints
 
-Query any node's HTTP interface using `curl` or your browser:
-
-* **Cluster Consensus Status (`GET /status`):**
+* **Node Consensus Status (`GET /status`):**
   ```bash
   curl -s [http://127.0.0.1:8080/status](http://127.0.0.1:8080/status) | python3 -m json.tool
   ```
@@ -204,16 +167,16 @@ Query any node's HTTP interface using `curl` or your browser:
   ```bash
   curl -s [http://127.0.0.1:8080/accounts](http://127.0.0.1:8080/accounts) | python3 -m json.tool
   ```
-* **Cryptographic Merkle Audit Proof for a Specific Account (`GET /account?address=<pubkey>`):**
+* **Cryptographic Merkle Audit Proof (`GET /account?address=<pubkey>`):**
   ```bash
   curl -s "[http://127.0.0.1:8080/account?address=a3fb25e72f2986a8c96948f43ae616dd3d06cf0ae044cf539ab4af0020b01a89](http://127.0.0.1:8080/account?address=a3fb25e72f2986a8c96948f43ae616dd3d06cf0ae044cf539ab4af0020b01a89)" | python3 -m json.tool
   ```
-* **Prometheus Telemetry (`GET /metrics`):**
+* **Prometheus Metrics (`GET /metrics`):**
   ```bash
   curl -s [http://127.0.0.1:8080/metrics](http://127.0.0.1:8080/metrics)
   ```
 
-To stop and clean up the cluster containers:
+Stop and remove the containers when finished:
 ```bash
 docker compose down
 ```
