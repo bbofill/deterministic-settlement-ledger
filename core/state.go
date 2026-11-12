@@ -196,3 +196,31 @@ func applyTransaction(accounts map[string]*Account, tx *Transaction) error {
 
 	return nil
 }
+
+func (sm *StateMachine) LastBlockHash() [32]byte {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.lastBlockHash
+}
+
+// PreviewBlock simula la ejecución de un bloque sin mutar el estado oficial para calcular su StateRoot.
+func (sm *StateMachine) PreviewBlock(block *Block) ([32]byte, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if block.Header.Height != sm.height+1 {
+		return [32]byte{}, fmt.Errorf("invalid preview height: expected %d, got %d", sm.height+1, block.Header.Height)
+	}
+
+	stagingAccounts := make(map[string]*Account, len(sm.accounts))
+	for k, v := range sm.accounts {
+		stagingAccounts[k] = v.Clone()
+	}
+
+	for _, tx := range block.Transactions {
+		if err := applyTransaction(stagingAccounts, tx); err != nil {
+			return [32]byte{}, err
+		}
+	}
+	return ComputeStateRoot(stagingAccounts), nil
+}
