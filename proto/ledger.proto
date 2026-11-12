@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "github.com/bbofill/deterministic-settlement-ledger/proto";
+
+enum TxType {
+  TX_MINT = 0;         // Depósito institucional / emisión inicial de liquidez
+  TX_TRANSFER = 1;     // Transferencia simple de un activo
+  TX_ATOMIC_SWAP = 2;  // Liquidación atómica Delivery-versus-Payment (DvP)
+}
+
+message Transaction {
+  TxType type = 1;
+  bytes sender = 2;              // Clave pública Ed25519 (32 bytes)
+  bytes counterparty = 3;        // Clave pública Ed25519 del receptor / contraparte
+  string asset_in = 4;           // Activo que entrega el sender (ej. "USD")
+  int64 amount_in = 5;           // Cantidad en punto fijo (ej. céntimos o 10^8)
+  string asset_out = 6;          // Activo que entrega la contraparte en DvP (ej. "BTC")
+  int64 amount_out = 7;          // Cantidad en punto fijo que recibe el sender
+  uint64 nonce = 8;              // Número secuencial anti-replay del sender
+  bytes sender_signature = 9;    // Firma Ed25519 del sender (64 bytes)
+  bytes counterparty_sig = 10;   // Firma Ed25519 de la contraparte (obligatoria en DvP)
+}
+
+message BlockHeader {
+  uint64 height = 1;
+  bytes prev_block_hash = 2;
+  bytes state_root = 3;
+  bytes tx_merkle_root = 4;
+  int64 timestamp_ms = 5;
+  bytes proposer_pub_key = 6;
+  bytes proposer_sig = 7;
+}
+
+message Block {
+  BlockHeader header = 1;
+  repeated Transaction transactions = 2;
+}
+
+message Vote {
+  uint64 height = 1;
+  bytes block_hash = 2;
+  bytes validator_pub_key = 3;
+  bytes signature = 4;
+}
+
+service SettlementNode {
+  rpc SubmitTransaction(Transaction) returns (SubmitResponse);
+  rpc ProposeBlock(Block) returns (Vote);
+  rpc CommitBlock(CommitRequest) returns (CommitResponse);
+}
+
+message SubmitResponse {
+  bool accepted = 1;
+  string tx_hash = 2;
+  string error_msg = 3;
+}
+
+message CommitRequest {
+  Block block = 1;
+  repeated Vote votes = 2;
+}
+
+message CommitResponse {
+  bool success = 1;
+  bytes state_root = 2;
+}
